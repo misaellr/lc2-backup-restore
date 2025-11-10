@@ -260,13 +260,13 @@ The service supports application-specific backup filtering:
 #### 4.1.1 Backup Components
 
 1. **Database**
-   - **Type:** MySQL 8.0 or PostgreSQL 13+
+   - **Type:** PostgreSQL 13+
    - **Size:** Typically 10GB - 2TB
-   - **Strategy:** Dual (snapshot + dump)
+   - **Strategy:** Incremental backups (primary) + Snapshots (fallback)
    - **Special Considerations:**
      - Large blob fields (document metadata)
      - Complex schema with 400+ tables
-     - Supports both MySQL and PostgreSQL
+     - Incremental backups significantly reduce backup time for large databases
 
 2. **Document Library**
    - **Storage:** File system or object storage (GCS, S3, Azure Blob)
@@ -297,11 +297,12 @@ spec:
   provider: aws
 
   database:
-    type: mysql
+    type: postgresql
     instance: liferay-prod-db
-    snapshotEnabled: true
-    dumpEnabled: true
-    dumpFormat: sql.gz
+    incrementalEnabled: true     # Primary backup strategy
+    snapshotEnabled: true        # Fallback strategy
+    dumpEnabled: true            # For cross-cloud portability
+    dumpFormat: custom           # PostgreSQL custom format
 
   storage:
     type: s3
@@ -332,13 +333,14 @@ spec:
 #### 4.2.1 Backup Components
 
 1. **Database**
-   - **Type:** MySQL 8.0 or MariaDB 10.6+
+   - **Type:** PostgreSQL 13+
    - **Size:** Typically 1GB - 500GB
-   - **Strategy:** Dual (snapshot + dump)
+   - **Strategy:** Incremental backups (primary) + Snapshots (fallback)
    - **Special Considerations:**
      - Separate content tables from cache tables
      - Exclude cache_* and sessions tables from backups
      - Support for Drush database dump integration
+     - Incremental backups reduce backup time and storage costs
 
 2. **Files Directory**
    - **Storage:** S3, GCS, or local file system
@@ -351,10 +353,24 @@ spec:
 
 3. **Configuration**
    - **Type:** YAML files exported via Drush
-   - **Strategy:** Git-based versioning + backup
+   - **Strategy:** Dual-track approach (Database backup + Separate config export)
    - **Special Considerations:**
-     - Configuration separate from content
-     - Settings.php excluded (environment-specific)
+     - **Database Backup:** Configuration stored in PostgreSQL is backed up as part of incremental/snapshot strategy
+     - **Config Export:** Automated `drush config:export` executed before each backup via pre-backup hooks
+     - **Rationale for Dual-Track:**
+       - **Point-in-Time Recovery:** Database backup provides complete state restoration
+       - **Version Control:** YAML exports enable Git-based configuration tracking
+       - **Environment Parity:** Exported configs can be deployed to dev/staging with different content
+       - **Selective Restore:** Configuration-only restores without overwriting content
+     - **What Gets Exported:**
+       - Site settings, content types, views, blocks, field definitions
+       - Taxonomy vocabularies, user roles, permissions
+       - Module configurations
+     - **What's Excluded:**
+       - Content (nodes, users, media) - handled by database backup
+       - State data (caches, temporary data) - regenerated on restore
+       - `settings.php` - environment-specific file
+     - **Storage:** Exported YAML configs stored alongside database backups in S3/GCS
 
 #### 4.2.2 Backup API Requirements
 
@@ -369,15 +385,23 @@ spec:
   provider: aws
 
   database:
-    type: mysql
+    type: postgresql
     instance: drupal-prod-db
-    snapshotEnabled: true
-    dumpEnabled: true
+    incrementalEnabled: true     # Primary backup strategy
+    snapshotEnabled: true        # Fallback strategy
+    dumpEnabled: true            # For cross-cloud portability
     excludeTables:
       - cache_*
       - sessions
       - watchdog
     drushIntegration: true
+    preBackupHooks:              # Execute before database backup
+      - name: export-drupal-config
+        command: |
+          drush config:export --destination=/tmp/config-export
+        storeArtifact: true      # Store exported YAML alongside database backup
+        artifactPath: /tmp/config-export
+        timeout: 300             # 5 minutes timeout
 
   storage:
     type: s3
@@ -393,6 +417,8 @@ spec:
   configuration:
     enabled: true
     exportCommand: "drush config:export"
+    storagePath: "config/"       # Store in separate S3 prefix
+    versionControl: true         # Track configuration changes over time
 ```
 
 #### 4.2.3 Restore Requirements
