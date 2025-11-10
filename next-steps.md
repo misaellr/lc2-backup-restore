@@ -7,6 +7,24 @@
 
 ## Recent Updates
 
+### Elasticsearch Scope Clarification (Commit d1cb20b) - **LATEST**
+
+**1. Requirements.md Updated - Elasticsearch NOT part of MVP:**
+- Section 1.2 (Scope): Removed Elasticsearch/OpenSearch from MVP environments
+- Section 4.1.1 (Liferay Search Index): Marked as ⏸️ NOT PART OF MVP with strategy reference
+- Section 4.1.3 (Restore Requirements): Split into MVP (rebuild from DB) and Post-MVP (snapshot restore)
+- Section 7.1 (Local Environment): Docker-compose OpenSearch marked as post-MVP
+
+**2. MVP Strategy:**
+- Database (PostgreSQL) and object storage (S3/MinIO) backup/restore only
+- Elasticsearch indexes rebuilt from database (acceptable for PoC phase)
+
+**3. Post-MVP Strategy:**
+- Full snapshot-based backup documented in `reference/elasticsearch-backup-ideas.txt`
+- Covers S3/GCS/MinIO repositories, GitOps CRD integration, multi-cloud support
+
+---
+
 ### Drupal Configuration Management Enhancement (Commit 3a839d4)
 
 **1. Database Standardization:**
@@ -63,10 +81,16 @@ database:
 
 ## Pending Requirements Updates (MVP Only)
 
-Based on the questions answered, the following **3 sections** need updates for MVP:
+Based on the questions answered, ~~3~~ **2 remaining sections** need updates for MVP (1 completed):
 
-### 1. ~~Elasticsearch/OpenSearch Backup Strategy~~ (Question #2) - **NOT MVP**
-**Status:** ⏸️ **DEFERRED - Post-MVP enhancement**
+### 1. ~~Elasticsearch/OpenSearch Backup Strategy~~ (Question #2) - **NOT MVP** ✅
+**Status:** ✅ **COMPLETED - Requirements updated (Commit d1cb20b)**
+
+**Requirements.md updates applied:**
+- Section 1.2 (Scope): Removed Elasticsearch from local/cloud environments, added explicit MVP scope
+- Section 4.1.1 (Liferay Search Index): Marked as ⏸️ NOT PART OF MVP with detailed strategy reference
+- Section 4.1.3 (Restore Requirements): Split into MVP and Post-MVP sections
+- Section 7.1 (Local Environment): Updated docker-compose diagram and config to mark OpenSearch as post-MVP
 
 **Reference:** Comprehensive strategy documented in `reference/elasticsearch-backup-ideas.txt`
 - Covers snapshot-based backup using S3/GCS/MinIO repositories
