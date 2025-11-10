@@ -47,7 +47,7 @@ database:
 | # | Question | Answer | Impact on Requirements |
 |---|----------|--------|------------------------|
 | **1** | **Database types for all apps** | ✅ All use **PostgreSQL 13+** (Liferay, Drupal, Bloomreach) | Updated all app sections to specify PostgreSQL |
-| **2** | **Elasticsearch backup strategy** | ✅ **Yes, required** - must have strategy for search index snapshots | **TODO:** Add Elasticsearch backup section |
+| **2** | **Elasticsearch backup strategy** | ✅ **Yes, needed long-term** - but **NOT part of MVP** | ⏸️ **Future:** Reference doc available at `reference/elasticsearch-backup-ideas.txt` |
 | **3** | **Cross-cloud restore mechanics** | ✅ Always use **dump format** (snapshots are cloud-specific) | Documented in requirements |
 | **4** | **Retention policy specifics** | ✅ **7 days default**, parameterizable per project | **TODO:** Update retention section with parameterization details |
 | **5** | **Backup windows/availability** | ✅ **Zero downtime** - hot backups required | Already documented in NFR-1 |
@@ -61,29 +61,20 @@ database:
 
 ---
 
-## Pending Requirements Updates
+## Pending Requirements Updates (MVP Only)
 
-Based on the questions answered, the following sections need updates:
+Based on the questions answered, the following **3 sections** need updates for MVP:
 
-### 1. Elasticsearch/OpenSearch Backup Strategy (Question #2)
-**Location:** Add new subsection to each application (4.1, 4.2, 4.3)
+### 1. ~~Elasticsearch/OpenSearch Backup Strategy~~ (Question #2) - **NOT MVP**
+**Status:** ⏸️ **DEFERRED - Post-MVP enhancement**
 
-**What to add:**
-- Elasticsearch 7.x / OpenSearch backup strategy
-- Snapshot repository configuration (S3/GCS-backed)
-- Index snapshot scheduling
-- Restore procedure (index rebuild vs snapshot restore)
-- Trade-offs: Backup vs rebuild from database
+**Reference:** Comprehensive strategy documented in `reference/elasticsearch-backup-ideas.txt`
+- Covers snapshot-based backup using S3/GCS/MinIO repositories
+- GitOps-friendly approach with BackupRequest/RestoreRequest CRD integration
+- Supports local dev (MinIO), AWS (OpenSearch), GCP/Azure (ECK)
+- Will be implemented in Phase 2+ after core database/storage backup is stable
 
-**Example structure:**
-```yaml
-searchIndex:
-  type: elasticsearch  # or opensearch
-  strategy: snapshot   # or rebuild
-  snapshotRepository: s3://backups/elasticsearch-snapshots
-  scheduleEnabled: true
-  rebuildTimeEstimate: "2 hours for 100GB index"
-```
+**MVP Approach:** Elasticsearch indexes can be rebuilt from database if needed (acceptable for PoC phase)
 
 ### 2. Retention Policy Parameterization (Question #4)
 **Location:** Section 4.1.2, 4.2.2, 4.3.2 - Update `retention` field

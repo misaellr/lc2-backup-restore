@@ -1,0 +1,406 @@
+Snapshot-Based Backup & Restore Strategy for Elasticsearch/OpenSearch (LC2)
+Goals and Overview
+This strategy uses snapshot and restore as the primary means of backing up Elasticsearch/OpenSearch indexes, aligning with the LC2 Backup/Restore architecture. Snapshots capture point-in-time index data with minimal downtime
+elastic.co
+, avoiding costly full reindexing. Key goals include:
+Environment Compatibility: A cloud-agnostic approach that works in local dev (self-hosted ES + MinIO), AWS (OpenSearch Service), and GCP/Azure (Elastic on Kubernetes via ECK).
+Efficiency: Prefer native snapshot/restore over full reindex from the database, using reindexing only as a fallback for exceptional cases (e.g. unrecoverable or missing snapshots).
+Flexibility: Support both full cluster recovery (all indices) and partial index restoration (select indices) from snapshots.
+Storage Repositories: Leverage provider-supported storage backends (S3, GCS, Azure Blob, MinIO) for reliable, external snapshot storage.
+Automation: Integrate with the LC2 Kubernetes operator (BackupRequest/RestoreRequest CRDs) to trigger backups/restores in a declarative, GitOps-friendly manner.
+Scheduling & Retention: Implement automated snapshot schedules and retention policies (via cron jobs or native Snapshot Lifecycle Management) to ensure regular backups and prune old snapshots.
+Security & Compliance: Follow best practices for IAM roles, access control, encryption (at rest and in transit), and verification of backups to ensure data safety and auditable recovery procedures.
+Snapshot Repository Setup (Cloud-Agnostic)
+Configure a snapshot repository in each environment for storing backups. Use a consistent repository name (e.g. "lc2-snapshots") across environments, with environment-specific settings:
+Local Dev (Elasticsearch + MinIO): Deploy a MinIO S3-compatible object store accessible to the ES container (e.g. within kind or Docker). Create a bucket (e.g. es-backups) in MinIO. In Elasticsearch, register a repository of type s3 pointing to MinIO’s endpoint
+elastic.co
+elastic.co
+. For example:
+PUT _snapshot/lc2-snapshots 
+{
+  "type": "s3",
+  "settings": {
+    "bucket": "es-backups",
+    "endpoint": "<minio-service-url>",
+    "protocol": "https"
+  }
+}
+Provide MinIO credentials via Kubernetes secret and Elasticsearch secure settings
+elastic.co
+ (access key and secret key) if not using an open access policy. If MinIO uses a self-signed TLS cert, import its CA into the ES JVM truststore
+elastic.co
+ so Elasticsearch trusts the endpoint. This repository allows local snapshots to be stored on MinIO.
+AWS (Amazon OpenSearch Service): Use an S3 bucket for snapshots. First, create an IAM role (often called TheSnapshotRole) with permissions to the bucket (and KMS decryption if using KMS encryption). Attach this role to the OpenSearch domain (or use AWS’s snapshot role setting). Register the repository via the OpenSearch API (one-time setup) using type s3 with the bucket name, region, and the IAM role’s ARN
+docs.aws.amazon.com
+. For example:
+PUT _snapshot/lc2-snapshots 
+{
+  "type": "s3",
+  "settings": {
+    "bucket": "<s3-bucket-name>",
+    "region": "<aws-region>",
+    "role_arn": "arn:aws:iam::123456789012:role/TheSnapshotRole",
+    "base_path": "es-snapshots/"    // optional prefix in bucket
+  }
+}
+Implementation notes: Ensure the IAM role is mapped to the cluster’s snapshot user if fine-grained access control is enabled (the role needs manage_snapshots permissions)
+docs.aws.amazon.com
+docs.aws.amazon.com
+. The OpenSearch Service domain must be able to assume this role (set up trust policy accordingly). By default, snapshots will use server-side encryption (SSE-S3) if your bucket enforces it; you can also enable SSE explicitly in the repo settings
+docs.aws.amazon.com
+. (AWS OpenSearch’s snapshot API doesn’t accept a KMS key ID directly
+docs.aws.amazon.com
+, so to use KMS encryption on the bucket, configure the bucket for SSE-KMS and allow the snapshot IAM role access to that KMS key
+docs.aws.amazon.com
+.)
+GCP (GKE + ECK-managed Elasticsearch): Use a Google Cloud Storage bucket. Enable GKE Workload Identity for the cluster so that an Elasticsearch pod’s KSA (Kubernetes Service Account) can act as a GCP service account
+elastic.co
+. Grant that GCP service account Storage Object Admin/Writer permissions on the GCS bucket. In the ECK Elasticsearch manifest, specify the Workload Identity service account and necessary env vars (so that the pod obtains short-lived GCP credentials)
+elastic.co
+. Then register a repository of type gcs via the ES API, providing the bucket name and (if not using Workload Identity) the credentials. For example:
+PUT _snapshot/lc2-snapshots 
+{
+  "type": "gcs",
+  "settings": { "bucket": "<gcs-bucket-name>" }
+}
+If not using Workload Identity, store a GCP service account JSON key in a K8s Secret and add it to Elasticsearch secure settings (key name gcs.client.default.credentials_file)
+elastic.co
+elastic.co
+. This injects the GCS credentials into the ES keystore so the cluster can access the bucket securely.
+Azure (AKS + ECK-managed Elasticsearch): Use Azure Blob Storage. Create an Azure Storage account and container for snapshots. Utilize Azure Workload Identity (if using ES 8.16+ which supports it natively
+elastic.co
+) to avoid static creds: configure an Azure AD app and federated identity mapping for a K8s service account, granting it the Storage Blob Data Contributor role on the storage account
+elastic.co
+elastic.co
+. Mount the Azure federated token into the ES pods (per Azure Workload Identity guidelines)
+elastic.co
+elastic.co
+. Then register a repository of type azure via the ES API, providing the container name in settings
+elastic.co
+:
+PUT _snapshot/lc2-snapshots 
+{
+  "type": "azure",
+  "settings": { "container": "<blob-container-name>" }
+}
+If not using workload identity, fall back to an Azure storage account name/key in a K8s Secret. Add azure.client.default.account (and key) to secure settings, similar to the GCS approach
+elastic.co
+elastic.co
+. Ensure the ES cluster’s config includes these secure settings so it can authenticate to Azure Blob.
+Automation & GitOps: Registering the snapshot repository should be automated and declarative. For ECK environments, this can be done by an init job or operator call that executes the PUT _snapshot API on cluster startup (with the config stored in Git). Alternatively, use Elastic’s Stack Configuration Policies if available to declare snapshot repos in the cluster spec. In all cases, avoid manual CLI steps – repository definitions and credentials live in code (K8s YAML and Secrets) for auditability. Once the repository (named "lc2-snapshots") is in place in each environment, all backup/restore operations will use it. You can verify the repository connectivity immediately after setup using the _snapshot/<repo>/_verify API (this ensures IAM and credentials are correct).
+docs.aws.amazon.com
+Backup (Snapshot) Process
+Snapshot Creation: Backups are performed by taking snapshots of the indices via the Elasticsearch/OpenSearch Snapshot API
+elastic.co
+. The LC2 Backup operator will handle this process in an automated way: when a BackupRequest custom resource is applied, the operator triggers a snapshot on the cluster. Key aspects of the snapshot process:
+Scope of Snapshots: By default, schedule cluster-wide snapshots including all indices (this captures a consistent state of the entire search dataset). Snapshots are incremental, meaning subsequent snapshots only save segments that changed since the last snapshot, improving efficiency
+elastic.co
+. For flexibility, the operator can support parameters in the BackupRequest to snapshot specific indices or patterns if a partial backup is needed, but generally one comprehensive snapshot on schedule is simpler to manage.
+Snapshot Naming: The operator can generate unique snapshot names (e.g. including date/time or an incrementing ID) for each BackupRequest. This name will be used to reference the snapshot during restore. All snapshots go into the configured lc2-snapshots repository.
+Execution: The operator calls the Elasticsearch _snapshot API (e.g. PUT /_snapshot/lc2-snapshots/<snapshot-name>?wait_for_completion=false) to start the snapshot asynchronously. It monitors the snapshot status via the cluster API until completion. Snapshots do not cause downtime; they can run while the cluster is in use
+elastic.co
+ (with minimal performance impact).
+Fallback to Reindex: In normal operations, every backup uses snapshots. However, the system retains the ability to reindex from the primary database if needed. For example, if a snapshot is unavailable or corrupted (very rare, especially if repository is verified), or if restoring to a cluster with an incompatible version where snapshots can’t be used, the data pipeline can re-feed the indexes from the source DB. This is a last-resort recovery method due to its time and resource cost. The snapshot strategy is designed to minimize reliance on full reindexing, but it’s important to document how to rebuild indexes from DB dumps or change streams as a contingency.
+Partial Index Backup: Typically, the snapshot repository will hold full cluster snapshots. If needed, one can snapshot a subset of indices (e.g. by specifying an index name or pattern in the snapshot request). This might be used if certain large indices change on different schedules or for ad-hoc backups of a single index. The operator can support this via BackupRequest fields (like spec.indices: ["index1","index2"]). All partial snapshots still go to the same repository, but will contain only the requested indices. In practice, incremental full snapshots are efficient and simpler, so partial snapshots are optional. Post-Snapshot Verification: After a snapshot completes, the strategy includes verification steps:
+The operator should check the snapshot’s status (via GET _snapshot/lc2-snapshots/<snap-name>). A status of SUCCESS indicates a complete snapshot; a PARTIAL status indicates some shards failed to backup
+docs.aws.amazon.com
+. In case of partial snapshots, the logs should be reviewed and if needed, another snapshot can be taken or missing shards documented (Elasticsearch allows restoring partial snapshots, but missing data would need an older snapshot or reindex to fill gaps
+docs.aws.amazon.com
+).
+Optionally, perform a test restore (in a non-production environment or to a temporary index) periodically. For example, restore a random small index from the snapshot to confirm the data is readable and indexes can be recovered. This is part of disaster-recovery drills and builds confidence in the snapshots.
+Maintain an audit log (could be within the operator’s CRD status or an external log) of backup operations: including snapshot name, time, duration, and result. This log is useful for compliance and debugging restore needs.
+Restore Process (Full & Partial)
+Restoration is carried out by the LC2 Restore operator when a RestoreRequest CRD is applied. The restore process can handle entire cluster recovery or single-index restores, depending on the situation:
+Full Cluster Restore: In a disaster scenario (e.g. total data loss or migrating to a new cluster), the restore procedure is to retrieve the latest snapshot from lc2-snapshots and load all indices. The operator will:
+Ensure the target cluster is prepared – e.g., if restoring into a fresh cluster, there’s no index name conflicts. If restoring into an existing cluster (not typical for full restore), it must delete or close any indices that conflict with those in the snapshot
+docs.aws.amazon.com
+. The safest approach for full recovery is to restore into a new empty cluster or delete all indices first for a clean slate
+docs.aws.amazon.com
+.
+Initiate the restore via the API: POST /_snapshot/lc2-snapshots/<snapshot-name>/_restore with no index filter (which means restore everything). This will recreate all indices and data from the snapshot. By default, the cluster state (metadata) is also restored, but it’s often recommended to exclude cluster-level settings if migrating to a different environment (e.g., use "include_global_state": false in the restore call). The operator can be configured accordingly if needed.
+Monitor the restore progress (it’s also an asynchronous operation). Once complete, the cluster should return to a green state with all indices recovered.
+After restore, any necessary post-restore steps should run: e.g. re-pointing alias writes if needed (the AWS docs note to disable writes or adjust aliases before restore to avoid conflicts
+docs.aws.amazon.com
+). Usually, in full restore, this is less of an issue if the cluster was empty to start.
+Partial (Selective) Restore: Often you may need to restore just one or a few indices (for example, if a single index was accidentally deleted or corrupted while others are fine). This strategy supports partial index recovery by leveraging the snapshot’s ability to restore specific indices:
+The RestoreRequest CRD should allow specifying an indices list or pattern. The operator will pass that to the restore API ({"indices": "<indexA>,<indexB>"} in the JSON body)
+docs.aws.amazon.com
+. Only those indices will be recreated from the snapshot. Other indices in the cluster remain untouched.
+If the index still exists (e.g. in a corrupted state), the operator should delete the target index first (or restore under a new name using rename_pattern/rename_replacement if you prefer not to delete)
+docs.aws.amazon.com
+docs.aws.amazon.com
+. For example, to avoid name conflicts, one could restore to a temporary name and then alias or reindex, but typically deleting the broken index and restoring it clean is simplest.
+The partial restore will pull just the data for those indices from the snapshot. This is faster and avoids downtime for the whole cluster. Once done, verify the restored index is healthy.
+Example: If index users was deleted by mistake, apply a RestoreRequest specifying indices: ["users"] and the snapshot name. The operator issues the restore call with {"indices": "users"}
+docs.aws.amazon.com
+ to recover only that index.
+Mixed Restore Strategies: In some cases, you might not want to restore every index from a snapshot (for instance, excluding Kibana or system indices). The restore API supports index patterns and exclusions
+docs.aws.amazon.com
+. We will by default exclude any non-data indices (like monitoring, Kibana, security indices) unless explicitly needed, to avoid overwriting current cluster config. For example, the operator might always include {"indices": "-.kibana*,-.opendistro*”} when restoring to a running cluster to skip system indices
+docs.aws.amazon.com
+. This ensures we don’t inadvertently restore old Kibana or security state on top of a new cluster.
+Post-Restore Verification: After any restore, the operator (or administrators) should verify index integrity: check document counts, run some queries, or cross-verify with source data if possible. If only a partial restore was done, ensure that other indices are still consistent (the restore process shouldn’t affect other indices, aside from using cluster resources during the operation).
+Fallback to Reindex on Restore: If a required index is not present in any available snapshot (or snapshots are all partial/incomplete for that index), the plan falls back to reindexing from the DB for that index. This can be initiated as a special RestoreRequest option (e.g. a flag like useReindex: true or a separate process outside of snapshots). The team should document how to trigger a reindex job for a given index from the authoritative data source, to complement the snapshot restore process. In practice, with frequent snapshots and proper retention, needing this fallback should be rare, but it remains a critical safety net.
+Downtime Considerations: For full cluster restore, plan for read-only or downtime window since the cluster will likely be replaced or indices removed. Partial restores can often be done live (except the specific index being restored is unavailable during the restore). Ensure clients of the service handle the read/write unavailability for that index gracefully during the restore window.
+Scheduling Snapshots and Retention Policies
+Regular automated snapshots are crucial. We employ scheduled snapshot policies with retention rules to maintain a history of backups without manual intervention. There are two approaches, depending on environment capabilities:
+Native Snapshot Lifecycle Management (SLM/SM): Leverage Elasticsearch’s Snapshot Lifecycle Management (SLM) or OpenSearch’s Snapshot Management (SM) plugin for built-in scheduling. This is the preferred approach on platforms that support it, because it runs inside the cluster and can manage retention:
+Elasticsearch (ECK on GCP/Azure, or self-managed): SLM is a native feature that can be configured with a cron schedule and retention rules (e.g. keep daily snapshots for 7 days, weekly for 4 weeks, etc.)
+opster.com
+. We can create an SLM policy (via the ES API or Kibana) that targets the lc2-snapshots repository. For example, a policy might snapshot all indices at midnight daily and delete snapshots older than 30 days
+opster.com
+. This policy creation can be automated (e.g. an init container or the operator issues the PUT _slm/policy/<name> call on cluster setup). All SLM policy definitions and changes should be checked into Git (perhaps as a script or noted in docs) to satisfy GitOps (since SLM is configured via API, we might store the JSON policy in our repo and apply it via automation).
+OpenSearch (AWS OpenSearch Service): OpenSearch’s Snapshot Management (SM) is functionally similar to SLM but is provided as a plugin (and in AWS’s managed service, it is available via OpenSearch Dashboards UI)
+opster.com
+docs.aws.amazon.com
+. If using AWS OpenSearch, after registering the S3 repo, you can define an SM policy through the Dashboards interface or the API. An SM policy uses cron syntax scheduling and can handle retention count (AWS notes up to 400 snapshots per policy, etc.)
+docs.aws.amazon.com
+docs.aws.amazon.com
+. For consistency, we should automate SM policy creation via API calls (the operator might call the REST API endpoints for SM plugin to create the policy JSON). If automation of SM is not feasible due to AWS restrictions, we may manage scheduling externally (see below). Note: AWS’s service also performs its own daily automated snapshot to a service-owned repository, but those are for disaster recovery and not directly user-accessible; our strategy uses the custom repo to allow full control and restore anywhere
+docs.aws.amazon.com
+.
+External Scheduling (CronJobs): In environments where native SLM/SM is not available or not desired (for example, if we prefer to keep all scheduling logic outside the cluster for GitOps reasons), we can use Kubernetes CronJobs (or an external scheduler) to trigger snapshots. For instance, a CronJob could run nightly to create a new BackupRequest CRD (or call the operator’s service directly) which in turn initiates the snapshot. This CronJob’s schedule and retention logic (deleting old snapshots) would be defined in code. Another approach is using a CI/CD pipeline or an Argo Workflow on a schedule to apply BackupRequests. External scheduling adds complexity but might be used for AWS if the SM plugin isn’t easily automatable via GitOps.
+Retention Policy: Regardless of scheduling method, enforce retention to avoid unlimited storage growth. If using SLM/SM, configure the built-in retention rules to keep a fixed number or age of snapshots
+opster.com
+ (e.g. "keep last 30 daily snapshots, delete older"). The cluster will auto-delete snapshots beyond that, which updates the repository metadata accordingly. If using CronJobs, implement retention by calling the snapshot DELETE API for old snapshots or by naming snapshots with timestamps and having a script decide which to purge. It’s generally safer to let Elasticsearch/OpenSearch handle deletion (to ensure all shard-level data and metadata is cleaned up properly).
+Snapshot Frequency: Align with RPO (Recovery Point Objective) requirements. For example, take snapshots nightly for non-critical indexes, or more frequently (e.g. hourly) if data changes rapidly and higher protection is needed. Note that taking snapshots very frequently can overlap if not completed in time, so monitor snapshot duration and adjust schedule (OpenSearch’s SM recommends no more than once per hour unless needed
+docs.aws.amazon.com
+). In LC2, a common approach might be daily full snapshots plus perhaps hourly snapshots of only the most critical index if required – this can be configured via multiple policies or CronJobs.
+Monitoring: The backup operator or an external monitor should watch for snapshot failures. If a scheduled snapshot fails or is skipped (e.g. due to cluster issues), alert the ops team so it can be retried or troubleshot. Both SLM and SM can send notifications (e.g. post to a Slack webhook or email) on failures if configured
+opster.com
+, or we integrate with our monitoring stack (e.g. check .slm-history index in ES for errors
+opster.com
+).
+All scheduling configuration (whether SLM JSON or CronJob manifests) is maintained in version control. This ensures the snapshot cadence and retention are auditable and can’t be accidentally changed without review (supporting GitOps principles).
+GitOps and Declarative Management
+To fit into a GitOps workflow (where infrastructure and operations are managed via code commits):
+Declarative Backup/Restore Requests: The introduction of BackupRequest and RestoreRequest Custom Resources means triggering a backup or restore is as simple as committing a YAML and letting the CD pipeline apply it. This provides an audit trail – each backup invocation can be tied to a pull request or Git commit (even scheduled backups if triggered via a CronJob could be represented as committing a new CRD instance or at least logged). In practice, scheduled backups might not generate a new file each time, so instead the operator’s log or a status resource can track them. Still, on-demand backups (e.g. before a major data change) can be done via GitOps by pushing a BackupRequest manifest.
+Repository and Policy Config as Code: All supporting configuration – snapshot repository settings, SLM policies, IAM roles, etc. – should be documented and stored in the Git repository that defines the LC2 environment. For example:
+Kubernetes Secrets for access keys (if used) are managed via sealed-secret or vault references in Git (so they can be applied to clusters in a controlled way).
+The repository registration API call could be represented by a small Kubernetes Job YAML in Git that runs curl (with the appropriate service account permissions) to register the repo on each new cluster. Or if the LC2 operator itself handles repo setup, its configuration (like S3 bucket names, etc.) lives in ConfigMap in Git.
+Snapshot Lifecycle policies (for ES) can be represented in a JSON file under source control and applied via an API call by an automation script.
+IAM policies and roles for access (e.g. IRSA mappings, GCP service account roles) are defined in Terraform or K8s spec in the GitOps repo.
+Auditing Changes: When any aspect of backup/restore config changes (e.g. changing the snapshot schedule or adding a new repository), it goes through code review. This auditability ensures compliance with any data management policies. Additionally, all snapshot/restore operations are logged. The operator can update the status of the BackupRequest/RestoreRequest CRD with timestamps and results, so these CRD objects (even if ephemeral) capture what was done when. Consider configuring the operator to not immediately delete completed CRD objects; instead, keep them for a short time or archive their info, so that there's a record (for example, a BackupRequest could have a status like “Completed at 2025-11-10T01:00Z, snapshot name: snap-2025.11.10-0001”).
+GitOps for Multi-Env: LC2 likely spans dev, staging, prod in various clouds. Use configuration overlays or parameters in the GitOps pipeline to adjust repository settings per environment, but keep the process uniform. For instance, the repository name “lc2-snapshots” is constant, but the underlying storage (bucket name, credentials) differ – those differences can be handled via environment-specific secrets and infra config, while the higher-level process (take snapshot via CRD) remains the same in code.
+In summary, everything from scheduling to execution is represented declaratively, enabling easy reviews and reproducibility. Operators and scripts act on those declarations to perform the actual snapshot/restore actions in the clusters.
+Verification and Testing Procedures
+Regular verification ensures the backups will be reliable when needed and that the process meets security and compliance standards:
+Repository Verification: On every new deployment or configuration change, run GET _snapshot/lc2-snapshots/_verify to verify the cluster can write to and read from the repository
+docs.aws.amazon.com
+. The operator might do this as part of its startup or health check. This catches misconfigurations (bad credentials, permissions, network issues) proactively.
+Snapshot Integrity Testing: At a scheduled interval (say monthly), perform a disaster recovery drill in a non-prod environment: spin up a test cluster (or use a staging cluster), configure it with access to the same snapshot repository (read-only mode if needed), and attempt to restore the latest snapshot. This test should be part of the runbook and can even be automated (in lower envs) to run and report success. It validates that the snapshots are complete and that the documented restore steps work. If any issues arise (e.g. missing indices, or changed mappings that prevent restore), adjust the process accordingly.
+Data Consistency Check: After snapshot operations, one can run lightweight checks. For example, compare a random sample of records between the primary DB and the restored data (if doing a test restore), or ensure the document counts in snapshot metadata match the live counts at backup time. The snapshot info API provides index-by-index details which can be used for validation.
+Operator Logs: Ensure the Backup/Restore operator logs all actions and any errors. Set up alerts on failures (for instance, if a snapshot fails to complete or a restore fails, an alert should fire). The logging should include security-related events as well, like authorization failures (to detect if credentials expired or IAM policy issues).
+Security Review: Periodically review that IAM roles and keys used for snapshots have least privilege. For instance, the S3 bucket policy should only allow access from the specific IAM role used by OpenSearch – verify this policy is in place and tested by attempting access with other credentials (should be denied). Similarly, ensure GCS service account used for snapshots doesn’t have broader access than necessary.
+Retention Efficacy: Monitor that old snapshots are actually getting pruned according to policy. List repository snapshots and confirm only the expected number remain. Sometimes retention policies might fail if a snapshot is in-progress or if the policy wasn’t applied; catching that before the storage fills up is important.
+By following these verification steps, the team ensures that backups are not just created, but are usable and safe. Document all these procedures in the team’s playbook, and integrate some into automated pipelines where practical.
+Security Considerations
+A robust security posture underpins this snapshot strategy, given that backups contain the full data set (often sensitive). Key security guidelines include:
+Access Control via IAM/Credentials: Use cloud-native identity features to avoid hardcoding credentials. On Kubernetes, prefer IRSA (IAM Roles for Service Accounts) for AWS
+elastic.co
+, Workload Identity for GCP
+elastic.co
+ and Azure
+elastic.co
+. These mechanisms allow the Elasticsearch pods to assume a role or identity with privileges to the storage, rather than storing long-lived keys. Only if those aren’t possible in an environment, fall back to static credentials in K8s Secrets – and even then, scope them tightly (e.g. keys that only have access to one bucket).
+Least Privilege: The storage bucket/container for snapshots should be dedicated to this purpose and restricted. For example, the S3 bucket policy should allow read/write only from the specific IAM role used by the OpenSearch domain for snapshots
+docs.aws.amazon.com
+docs.aws.amazon.com
+. Similarly, GCS bucket should only allow the specific service account. No other services/users should have write access, preventing tampering or accidental deletion of backups. If using MinIO for dev, secure it with access key/secret and network policies (since MinIO likely runs locally, at least limit its exposure to the cluster network).
+Encryption: Enable encryption for snapshots at rest. On cloud storage, this is usually a toggle:
+For AWS S3, enable bucket default encryption (SSE-S3 or SSE-KMS). If SSE-KMS is used, ensure the IAM role is allowed to use the KMS key
+docs.aws.amazon.com
+. When registering the repository on AWS, you can set "server_side_encryption": true to indicate SSE should be used
+docs.aws.amazon.com
+ (this covers SSE-S3 using AES-256 by AWS).
+GCS and Azure automatically encrypt data at rest, but for added control you can use customer-managed keys if needed. If so, grant the service accounts access to those keys.
+In self-managed envs (MinIO), if possible run MinIO with encryption or on encrypted disks. If not, at least it’s in a dev context so impact is lower.
+Encryption in transit: All connections to the object stores should be over HTTPS. Verify TLS is in use when ES connects to the repository endpoint (the repository settings use https in endpoint URLs, and custom CAs are configured properly
+elastic.co
+).
+Snapshot Data Security: Treat snapshot files with the same sensitivity as database backups. They contain all index data, including any personal or confidential information. Limit who can request a restore or access the snapshot repository. In practice, only the backup operator and perhaps cluster admins need permissions to initiate restores. The Backup/Restore CRDs can be RBAC-protected so that application developers cannot arbitrarily restore data without approval.
+Isolation and Auditing: Keep an audit trail of who initiated backup/restore operations. In GitOps, this is partly via commit history. Additionally, consider having the operator record the user that applied the CRD (Kubernetes metadata) or require an annotation like “requestedBy: username” in the CRD for traceability. From the cloud side, monitor access logs: S3 access logs or CloudTrail for any snapshot repository access, GCS bucket logs, etc., to detect any anomalies (e.g. someone manually downloading snapshot files – which ideally they shouldn’t be able to).
+Cluster Security During Restore: When performing restores, especially full cluster ones, be mindful of security index restoration. If using X-Pack security or OpenSearch security plugin, the restore may include the security indices (like .security or .opendistro_security). Restoring those could revert security configs/users. It might be wise to exclude those feature-specific indices in most restores
+opster.com
+ (unless the goal is full cluster state recovery). Elasticsearch allows specifying which feature states to include/exclude in snapshots from v7.10+
+opster.com
+. Our policy can exclude security state if cross-environment restores are done, to avoid overwriting credentials.
+Testing Permissions: As part of setup, simulate a failure: e.g. remove permissions from the IAM role and confirm snapshot fails (and is reported), then restore permissions. This ensures the failure mode is understood and visible.
+By adhering to these security measures – proper IAM roles, encryption, restricted access, and thorough auditing – the snapshot repository will remain a secure backup of data, aligning with enterprise security requirements. This strategy ensures that LC2’s Elasticsearch/OpenSearch data is safely backed up and can be restored on demand across all supported environments, with minimal downtime and full observability into the process.
+Citations
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Registering a manual snapshot repository - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-registerdirectory.html
+
+Registering a manual snapshot repository - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-registerdirectory.html
+
+Registering a manual snapshot repository - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-registerdirectory.html
+
+Registering a manual snapshot repository - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-registerdirectory.html
+
+Registering a manual snapshot repository - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-registerdirectory.html
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Restoring snapshots - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-restore.html
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Restoring snapshots - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-restore.html
+
+Restoring snapshots - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-restore.html
+
+Restoring snapshots - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-restore.html
+
+Restoring snapshots - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-restore.html
+
+Restoring snapshots - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-restore.html
+
+Restoring snapshots - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-restore.html
+
+Restoring snapshots - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-restore.html
+
+Elasticsearch SLM vs OpenSearch Snapshot Management
+
+https://opster.com/guides/elasticsearch/data-architecture/elasticsearch-slm-vs-opensearch-snapshot-management/
+
+Elasticsearch SLM vs OpenSearch Snapshot Management
+
+https://opster.com/guides/elasticsearch/data-architecture/elasticsearch-slm-vs-opensearch-snapshot-management/
+
+Automating snapshots with Snapshot Management - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-mgmt.html
+
+Automating snapshots with Snapshot Management - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-mgmt.html
+
+Automating snapshots with Snapshot Management - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-mgmt.html
+
+Automating snapshots with Snapshot Management - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-mgmt.html
+
+Automating snapshots with Snapshot Management - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-mgmt.html
+
+Elasticsearch SLM vs OpenSearch Snapshot Management
+
+https://opster.com/guides/elasticsearch/data-architecture/elasticsearch-slm-vs-opensearch-snapshot-management/
+
+Elasticsearch SLM vs OpenSearch Snapshot Management
+
+https://opster.com/guides/elasticsearch/data-architecture/elasticsearch-slm-vs-opensearch-snapshot-management/
+
+Manage snapshot repositories in Elastic Cloud on Kubernetes | Elastic Docs
+
+https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/cloud-on-k8s
+
+Registering a manual snapshot repository - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-registerdirectory.html
+
+Registering a manual snapshot repository - Amazon OpenSearch Service
+
+https://docs.aws.amazon.com/opensearch-service/latest/developerguide/managedomains-snapshot-registerdirectory.html
+
+Elasticsearch SLM vs OpenSearch Snapshot Management
+
+https://opster.com/guides/elasticsearch/data-architecture/elasticsearch-slm-vs-opensearch-snapshot-management/
+
+Elasticsearch SLM vs OpenSearch Snapshot Management
+
+https://opster.com/guides/elasticsearch/data-architecture/elasticsearch-slm-vs-opensearch-snapshot-management/
