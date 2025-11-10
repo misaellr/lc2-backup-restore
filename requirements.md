@@ -36,9 +36,11 @@ The purpose of this document is to outline the requirements for the LC2 Backup a
 
 This document covers the definition, implementation, and management requirements for the LC2 Backup and Restore Service. It pertains to:
 
-- **Local Environments:** Configured with k3d and Docker Compose using MinIO, Elasticsearch/OpenSearch, and PostgreSQL
-- **Cloud Environments:** AWS-based deployments utilizing EKS, RDS, S3, and OpenSearch
+- **Local Environments:** Configured with k3d and Docker Compose using MinIO and PostgreSQL
+- **Cloud Environments:** AWS-based deployments utilizing EKS, RDS, and S3
 - **Key Innovation:** Enhanced Hybrid Approach leveraging managed service APIs to minimize operational issues such as Out-Of-Memory (OOM) errors
+- **MVP Scope:** Database (PostgreSQL) and object storage (S3/MinIO) backup/restore
+- **Post-MVP:** Elasticsearch/OpenSearch snapshot-based backup (see `reference/elasticsearch-backup-ideas.txt`)
 
 The service will be deployed as a Kubernetes microservice and will support three distinct content management platforms with varying architectural requirements.
 
@@ -279,10 +281,14 @@ The service supports application-specific backup filtering:
        - Cache files (`/document_library/*/.cache/*`)
      - Reduces backup size by 40-60%
 
-3. **Search Index**
+3. **Search Index** ⏸️ **NOT PART OF MVP**
    - **Type:** Elasticsearch 7.x or OpenSearch
-   - **Strategy:** Optional backup (can be rebuilt from database)
-   - **Consideration:** Rebuilding index may take hours for large datasets
+   - **MVP Strategy:** Rebuild from database (acceptable for PoC phase)
+   - **Post-MVP Strategy:** Snapshot-based backup using S3/GCS/MinIO repositories
+   - **Reference:** Comprehensive strategy documented in `reference/elasticsearch-backup-ideas.txt`
+   - **Consideration:** Rebuilding index may take hours for large datasets, but acceptable for MVP
+   - **Rationale:** Core database and storage backup provides sufficient data protection for PoC phase
+   - **Future Enhancement:** Full snapshot/restore strategy will be implemented in Phase 2+
 
 #### 4.1.2 Backup API Requirements
 
@@ -321,10 +327,15 @@ spec:
 
 #### 4.1.3 Restore Requirements
 
+**MVP Scope:**
 - **Full Restore:** Database + Document Library
-- **Partial Restore:** Database only (regenerate search index)
+- **Partial Restore:** Database only (search index rebuilt from database - acceptable for PoC)
 - **Point-in-Time Restore:** Use snapshot for specific timestamp
 - **Cross-Environment Restore:** Use dump for dev/staging from production backup
+
+**Post-MVP:**
+- **Full Restore with Search Index:** Database + Document Library + Elasticsearch snapshot restore
+- **Search Index Only Restore:** Restore Elasticsearch snapshot without affecting database/storage
 
 ### 4.2 Acquia Drupal
 
@@ -1162,14 +1173,14 @@ Local development uses k3d (lightweight Kubernetes) with Docker Compose for supp
 └─────────────────────────────────────────────┘
                  │
                  ▼
-┌─────────────────────────────────────────────┐
-│        Docker Compose Services              │
-│                                             │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-│  │  MinIO   │  │OpenSearch│  │PostgreSQL│  │
-│  │ (S3 API) │  │          │  │(Metadata)│  │
-│  └──────────┘  └──────────┘  └──────────┘  │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│        Docker Compose Services                          │
+│                                                         │
+│  ┌──────────┐  ┌──────────────┐  ┌──────────┐          │
+│  │  MinIO   │  │ OpenSearch ⏸ │  │PostgreSQL│          │
+│  │ (S3 API) │  │ (Post-MVP)   │  │(Metadata)│          │
+│  └──────────┘  └──────────────┘  └──────────┘          │
+└─────────────────────────────────────────────────────────┘
 ```
 
 #### 7.1.2 Configuration
@@ -1190,7 +1201,7 @@ services:
     volumes:
       - minio-data:/data
 
-  opensearch:
+  opensearch:  # ⏸️ NOT PART OF MVP - For post-MVP Elasticsearch backup testing
     image: opensearchproject/opensearch:2.11.0
     environment:
       - discovery.type=single-node
