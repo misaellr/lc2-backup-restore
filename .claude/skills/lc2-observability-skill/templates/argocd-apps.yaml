@@ -1,0 +1,45 @@
+# app-of-apps for observability
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: obs-stack
+  namespace: argocd
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/your-org/lc2-platform.git
+    targetRevision: HEAD
+    path: charts/observability
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: logging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+---
+# per-tenant project
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: acme
+  namespace: argocd
+spec:
+  sourceRepos:
+    - https://github.com/your-org/*
+  destinations:
+    - namespace: acme-dev
+      server: https://kubernetes.default.svc
+    - namespace: acme-uat
+      server: https://kubernetes.default.svc
+    - namespace: acme-prd
+      server: https://kubernetes.default.svc
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: Deployment
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: Secret

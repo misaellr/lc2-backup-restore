@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: <project>
+  namespace: argocd
+spec:
+  sourceRepos:
+    - https://github.com/your-org/*
+  destinations:
+    - namespace: <project>-dev
+      server: https://kubernetes.default.svc
+    - namespace: <project>-uat
+      server: https://kubernetes.default.svc
+    - namespace: <project>-prd
+      server: https://kubernetes.default.svc
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: Deployment
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: Secret

@@ -1,0 +1,49 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: netpol-default-deny-generate
+spec:
+  generateExisting: true
+  rules:
+  - name: generate-default-deny
+    match:
+      any:
+      - resources:
+          kinds: ["Namespace"]
+    generate:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      name: default-deny
+      namespace: "{{ request.object.metadata.name }}"
+      synchronize: true
+      data:
+        spec:
+          podSelector: {}
+          policyTypes: ["Ingress","Egress"]
+---
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: labels-and-no-disable-logging
+  namespace: acme-dev
+spec:
+  validationFailureAction: Enforce
+  rules:
+  - name: inject-labels
+    match: { any: [ { resources: { kinds: ["Deployment","StatefulSet","DaemonSet","Job","CronJob"] } } ] }
+    mutate:
+      patchStrategicMerge:
+        metadata:
+          labels:
+            lc2.liferay.com/project: "acme"
+            lc2.liferay.com/env: "dev"
+  - name: deny-disable-logging
+    match: { any: [ { resources: { kinds: ["Pod","Namespace"] } } ] }
+    validate:
+      message: "disabling logging is not permitted for tenant namespaces"
+      deny:
+        conditions:
+          any:
+          - key: "{{request.object.metadata.labels.lc2\.liferay\.com/logging}}"
+            operator: Equals
+            value: "disabled"

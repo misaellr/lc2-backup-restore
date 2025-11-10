@@ -1,0 +1,11 @@
+apiVersion: 1
+datasources:
+- name: Loki
+  type: loki
+  access: proxy
+  url: https://logs-gw.example.com
+  isDefault: true
+- name: Metrics
+  type: prometheus
+  access: proxy
+  url: https://metrics-gw.example.com/prometheus

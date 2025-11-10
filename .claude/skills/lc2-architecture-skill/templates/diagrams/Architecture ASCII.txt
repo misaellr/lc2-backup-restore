@@ -1,0 +1,25 @@
+LC2 Architecture (Layers)
+
++------------------------------------------------------------+
+|                        Infrastructure                      |
+|  Local / AWS / Azure / GCP (LB, DNS, TLS, secrets,         |
+|  managed Prometheus, cloud logs, object storage)           |
++-------------------------------^----------------------------+
+                                |
++-------------------------------|----------------------------+
+|                           Kubernetes                       |
+|  K3D / EKS / AKS / GKE (Argo CD, Kyverno, cert-manager,    |
+|  ExternalDNS, External Secrets Operator, Ingress, Alloy)   |
++-------------------------------^----------------------------+
+                                |
++-------------------------------|----------------------------+
+|                      PaaS (Cockpit)                        |
+|  GitOps management, project provisioning, SSO,             |
+|  deep-links to Argo/Grafana, metadata DB                   |
++-------------------------------^----------------------------+
+                                |
++-------------------------------|----------------------------+
+|                 Project (Environments & Apps)              |
+|  <project>-dev/uat/prd namespaces, quotas, RBAC,           |
+|  workloads (Liferay DXP etc.), Grafana Alloy               |
++------------------------------------------------------------+

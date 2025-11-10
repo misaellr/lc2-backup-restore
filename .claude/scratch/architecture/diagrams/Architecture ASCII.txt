@@ -1,0 +1,226 @@
+# LC2 Cockpit Backend - Architecture Diagram
+
+## Four-Layer Model
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ LAYER 4: Observability                                                     │
+│ ┌─────────────┬──────────────┬────────────────┬─────────────────────────┐ │
+│ │  Metrics    │    Logs      │ Health Checks  │   Dashboards            │ │
+│ │ Prometheus  │  Loki/Cloud  │  Actuator      │   Grafana OSS           │ │
+│ │ /actuator/  │  Structured  │  - Liveness    │   (Org per project)     │ │
+│ │  prometheus │  JSON logs   │  - Readiness   │                         │ │
+│ └─────────────┴──────────────┴────────────────┴─────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ LAYER 3: Application Workloads (Tenant Applications)                       │
+│ ┌───────────────────────────┬─────────────────────────────────────────┐   │
+│ │ Namespace: acme-dev       │ Namespace: acme-prd                     │   │
+│ │ ┌───────────────────────┐ │ ┌───────────────────────────────────┐   │   │
+│ │ │ Liferay DXP           │ │ │ Liferay DXP                       │   │   │
+│ │ │ - Deployment          │ │ │ - Deployment                      │   │   │
+│ │ │ - Service             │ │ │ - Service                         │   │   │
+│ │ │ - Ingress (TLS)       │ │ │ - Ingress (TLS)                   │   │   │
+│ │ │ - PersistentVolume    │ │ │ - PersistentVolume                │   │   │
+│ │ │ - ConfigMaps/Secrets  │ │ │ - ConfigMaps/Secrets              │   │   │
+│ │ └───────────────────────┘ │ └───────────────────────────────────┘   │   │
+│ └───────────────────────────┴─────────────────────────────────────────┘   │
+│                                                                             │
+│ Isolation: Namespace, RBAC, NetworkPolicy, ResourceQuota                   │
+│ GitOps: Argo CD Application per environment                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ LAYER 2: Per-Project Infrastructure                                        │
+│ ┌─────────────────────────────────────────────────────────────────────────┐│
+│ │ Per Project: acme                                                       ││
+│ │ ┌────────────┬─────────────┬───────────────┬─────────────────────────┐ ││
+│ │ │ Namespaces │ RBAC        │ Quotas        │ Argo CD AppProject      │ ││
+│ │ │ - acme-dev │ - Roles     │ - CPU/Memory  │ - Source repo limits    │ ││
+│ │ │ - acme-uat │ - Bindings  │ - Storage     │ - Namespace fences      │ ││
+│ │ │ - acme-prd │ - SA        │ - Pods        │ - Resource whitelist    │ ││
+│ │ └────────────┴─────────────┴───────────────┴─────────────────────────┘ ││
+│ │ ┌────────────────────────┬──────────────────────────────────────────┐  ││
+│ │ │ NetworkPolicies        │ ExternalSecrets                          │  ││
+│ │ │ - Default deny         │ - Database credentials                   │  ││
+│ │ │ - Allow DNS            │ - API keys                               │  ││
+│ │ │ - Allow DB egress      │ - TLS certificates                       │  ││
+│ │ └────────────────────────┴──────────────────────────────────────────┘  ││
+│ └─────────────────────────────────────────────────────────────────────────┘│
+│                                                                             │
+│ Created by: Cockpit Backend via Kubernetes API                             │
+│ Managed via: GitOps (Argo CD)                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ LAYER 1: Shared Platform Services (Cluster-Wide)                           │
+│ ┌─────────────┬──────────────┬───────────────┬───────────────────────────┐ │
+│ │ Argo CD     │ Kyverno      │ Cert-Manager  │ Ingress-NGINX             │ │
+│ │ (argocd)    │ (kyverno)    │ (cert-mgr)    │ (ingress-nginx)           │ │
+│ │ - GitOps    │ - PSS Policy │ - TLS certs   │ - HTTP routing            │ │
+│ │ - App sync  │ - Quotas     │ - Auto-renew  │ - TLS termination         │ │
+│ │ - Rollback  │ - Labels     │ - Let's       │                           │ │
+│ │             │ - Registry   │   Encrypt     │                           │ │
+│ └─────────────┴──────────────┴───────────────┴───────────────────────────┘ │
+│ ┌─────────────┬──────────────┬───────────────┬───────────────────────────┐ │
+│ │ External    │ Grafana OSS  │ Loki          │ Cockpit Backend           │ │
+│ │ Secrets     │ (grafana)    │ (loki)        │ (cockpit-system)          │ │
+│ │ (ext-sec)   │ - Shared UI  │ - Logs        │ - Control Plane API       │ │
+│ │ - AWS SM    │ - Org/project│ - Optional    │ - Project provisioning    │ │
+│ │ - Azure KV  │ - Dashboards │               │ - Orchestration           │ │
+│ │ - GCP SM    │              │               │                           │ │
+│ └─────────────┴──────────────┴───────────────┴───────────────────────────┘ │
+│                                                                             │
+│ Managed by: Platform team                                                  │
+│ RBAC: Cluster-admin access only                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+                            COCKPIT BACKEND DETAIL
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Cockpit Backend Architecture                                               │
+│                                                                             │
+│  ┌────────────────┐                                                        │
+│  │   Ingress      │ HTTPS (TLS)                                            │
+│  │   (NGINX)      │ cockpit-backend.lc2.liferay.cloud                      │
+│  └────────┬───────┘                                                        │
+│           │                                                                 │
+│           ▼                                                                 │
+│  ┌────────────────────────────────────────────────────────┐               │
+│  │ Cockpit Backend (Spring Boot)                          │               │
+│  │ ┌────────────────────────────────────────────────────┐ │               │
+│  │ │ REST Controllers                                   │ │               │
+│  │ │ - AdminProjectController                           │ │               │
+│  │ │ - EnvironmentController                            │ │               │
+│  │ │ - MemberController                                 │ │               │
+│  │ │ - PodsController                                   │ │               │
+│  │ │ - AuditController                                  │ │               │
+│  │ │ - HealthController                                 │ │               │
+│  │ └────────────┬───────────────────────────────────────┘ │               │
+│  │              ▼                                           │               │
+│  │ ┌────────────────────────────────────────────────────┐ │               │
+│  │ │ Service Layer                                      │ │               │
+│  │ │ - ProjectService                                   │ │               │
+│  │ │ - MemberService                                    │ │               │
+│  │ │ - AuditService                                     │ │               │
+│  │ │ - KubernetesService (optional)                     │ │               │
+│  │ │ - RbacService                                      │ │               │
+│  │ │ - MetricsService                                   │ │               │
+│  │ └────────────┬───────────────────────────────────────┘ │               │
+│  │              ▼                                           │               │
+│  │ ┌────────────────────────────────────────────────────┐ │               │
+│  │ │ Repository Layer (Spring Data JPA)                 │ │               │
+│  │ │ - ProjectRepository                                │ │               │
+│  │ │ - MemberRepository                                 │ │               │
+│  │ │ - AuditEventRepository                             │ │               │
+│  │ └────────────┬───────────────────────────────────────┘ │               │
+│  └──────────────┼──────────────────────────────────────────┘               │
+│                 │                   │                                       │
+│                 ▼                   ▼                                       │
+│       ┌─────────────────┐  ┌──────────────────┐                           │
+│       │   PostgreSQL    │  │ Kubernetes API   │                           │
+│       │   (RDS/Azure/   │  │ (via Fabric8)    │                           │
+│       │    Cloud SQL)   │  │ - List pods      │                           │
+│       │                 │  │ - Create ns      │                           │
+│       │ Tables:         │  │ - Manage RBAC    │                           │
+│       │ - project       │  │ - Sync Argo CD   │                           │
+│       │ - environment   │  └──────────────────┘                           │
+│       │ - member        │                                                  │
+│       │ - audit_event   │                                                  │
+│       │ - argo_app      │                                                  │
+│       └─────────────────┘                                                  │
+│                                                                             │
+│  Observability:                                                            │
+│  - Metrics: /actuator/prometheus                                           │
+│  - Health: /actuator/health, /api/health                                   │
+│  - Logs: Structured JSON to stdout                                         │
+│                                                                             │
+│  Security:                                                                 │
+│  - Session auth (HTTP-only cookies)                                        │
+│  - CSRF protection                                                         │
+│  - RBAC enforcement (RbacService)                                          │
+│  - Audit trail (all mutations logged)                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+                                DATA FLOW
+═══════════════════════════════════════════════════════════════════════════════
+
+User Request Flow (Project Creation):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. POST /api/admin/projects
+   {
+     "name": "ACME Corp",
+     "description": "ACME project",
+     "ownerId": "uuid"
+   }
+   ↓
+2. AdminProjectController receives request
+   ↓
+3. SecurityConfig verifies session + CSRF token
+   ↓
+4. RbacService.requireAdminAccess(userEmail) ✅
+   ↓
+5. ProjectService.createProject()
+   ├─→ Save to PostgreSQL (project table)
+   ├─→ MetricsService.recordProjectCreated()
+   ├─→ AuditService.logEvent(actor, "project.create", SUCCESS)
+   └─→ KubernetesService.createProjectNamespaces()
+       ├─→ Create namespace: acme-dev
+       ├─→ Create namespace: acme-uat
+       ├─→ Create namespace: acme-prd
+       ├─→ Apply ResourceQuota per namespace
+       ├─→ Apply NetworkPolicy (default-deny)
+       └─→ Create Argo CD AppProject (project-acme)
+   ↓
+6. Return 201 Created with project JSON
+
+Time: <2 seconds (local), <5 seconds (cloud)
+
+═══════════════════════════════════════════════════════════════════════════════
+                            DEPLOYMENT TOPOLOGY
+═══════════════════════════════════════════════════════════════════════════════
+
+Local (k3d):
+┌──────────────────────────────────────────────────────────┐
+│ Developer Laptop                                         │
+│ ┌──────────────────────────────────────────────────────┐ │
+│ │ k3d cluster                                          │ │
+│ │ ┌──────────────┐  ┌──────────────┐                  │ │
+│ │ │ cockpit-     │  │ acme-dev,    │                  │ │
+│ │ │ system       │  │ beta-dev     │                  │ │
+│ │ │ - Backend    │  │ (projects)   │                  │ │
+│ │ └──────────────┘  └──────────────┘                  │ │
+│ └──────────────────────────────────────────────────────┘ │
+│ ┌──────────────────────────────────────────────────────┐ │
+│ │ Docker PostgreSQL (localhost:5432)                   │ │
+│ └──────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────┘
+
+Cloud (EKS/AKS/GKE):
+┌──────────────────────────────────────────────────────────┐
+│ Kubernetes Cluster (Managed)                             │
+│ ┌──────────────────────────────────────────────────────┐ │
+│ │ cockpit-system namespace                             │ │
+│ │ ┌──────────────┐                                     │ │
+│ │ │ Cockpit      │                                     │ │
+│ │ │ Backend      │────┐                                │ │
+│ │ │ Deployment   │    │                                │ │
+│ │ └──────────────┘    │                                │ │
+│ └────────────────────│────────────────────────────────┘ │
+│                      │                                   │
+│ ┌────────────────────▼──────────────────────────────┐   │
+│ │ Project namespaces (acme-dev, beta-prd, etc.)    │   │
+│ └──────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────────┐
+│ Managed PostgreSQL (RDS/Azure Database/Cloud SQL)       │
+│ - Automatic backups                                      │
+│ - Multi-AZ replication                                   │
+│ - Encrypted at rest                                      │
+└──────────────────────────────────────────────────────────┘

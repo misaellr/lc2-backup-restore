@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki-tenant-gateway
+  namespace: logging
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: loki-tenant-gateway }
+  template:
+    metadata:
+      labels: { app: loki-tenant-gateway }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.25
+          volumeMounts:
+            - name: cfg
+              mountPath: /etc/nginx
+          ports: [{ containerPort: 8080 }]
+      volumes:
+        - name: cfg
+          configMap:
+            name: loki-tenant-gateway-cm
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-tenant-gateway-cm
+  namespace: logging
+data:
+  nginx.conf: |
+    events {}
+    http {
+      map $http_x_scope_orgid $deny_client_header {
+        default 1;
+        "" 0;
+      }
+      server {
+        listen 8080;
+        # deny client-sent tenant headers
+        if ($deny_client_header) { return 400; }
+        # inject tenant header from auth/session mapping (hooked by sidecar or auth module)
+        proxy_set_header X-Scope-OrgID $project_id_from_oidc;
+        location / {
+          proxy_pass http://loki-distributor.logging.svc.cluster.local:3100;
+        }
+      }
+    }

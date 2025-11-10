@@ -1,0 +1,370 @@
+---
+# Cockpit System Namespace
+# This namespace hosts the Cockpit Backend control plane API
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cockpit-system
+  labels:
+    app.kubernetes.io/name: cockpit-system
+    app.kubernetes.io/part-of: cockpit
+    app.kubernetes.io/managed-by: argocd
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    lc2.liferay.com/description: "Cockpit Backend control plane system namespace"
+    lc2.liferay.com/owner: "platform-team@liferay.com"
+    lc2.liferay.com/created-at: "2025-11-02T00:00:00Z"
+
+---
+# Resource Quota for Cockpit System Namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: cockpit-system-quota
+  namespace: cockpit-system
+  labels:
+    app.kubernetes.io/part-of: cockpit
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: "8Gi"
+    limits.cpu: "8"
+    limits.memory: "16Gi"
+    persistentvolumeclaims: "5"
+    services.loadbalancers: "0"  # Use Ingress instead
+    services.nodeports: "0"       # Use Ingress instead
+
+---
+# LimitRange for Cockpit System Namespace
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: cockpit-system-limits
+  namespace: cockpit-system
+  labels:
+    app.kubernetes.io/part-of: cockpit
+spec:
+  limits:
+    # Container limits
+    - type: Container
+      max:
+        cpu: "2"
+        memory: "4Gi"
+      min:
+        cpu: "10m"
+        memory: "64Mi"
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "256Mi"
+    # Pod limits
+    - type: Pod
+      max:
+        cpu: "4"
+        memory: "8Gi"
+    # PVC limits
+    - type: PersistentVolumeClaim
+      max:
+        storage: "100Gi"
+      min:
+        storage: "1Gi"
+
+---
+# NetworkPolicy - Default Deny All Ingress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: cockpit-system
+  labels:
+    app.kubernetes.io/part-of: cockpit
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+
+---
+# NetworkPolicy - Allow DNS
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: cockpit-system
+  labels:
+    app.kubernetes.io/part-of: cockpit
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS queries to kube-dns/coredns
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# NetworkPolicy - Allow Ingress from ingress-nginx
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-nginx
+  namespace: cockpit-system
+  labels:
+    app.kubernetes.io/part-of: cockpit
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cockpit-backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# NetworkPolicy - Allow Egress to PostgreSQL
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-egress
+  namespace: cockpit-system
+  labels:
+    app.kubernetes.io/part-of: cockpit
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cockpit-backend
+  policyTypes:
+    - Egress
+  egress:
+    # Allow PostgreSQL connections (RDS/Azure Database/Cloud SQL external)
+    - to:
+        - podSelector: {}  # Allow to any external IP (managed DB is outside cluster)
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# NetworkPolicy - Allow Egress to Kubernetes API
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-k8s-api-egress
+  namespace: cockpit-system
+  labels:
+    app.kubernetes.io/part-of: cockpit
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cockpit-backend
+  policyTypes:
+    - Egress
+  egress:
+    # Allow Kubernetes API server access
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              component: apiserver
+      ports:
+        - protocol: TCP
+          port: 443
+    # Also allow direct access to API server service
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# ServiceAccount for Cockpit Backend
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cockpit-backend-sa
+  namespace: cockpit-system
+  labels:
+    app.kubernetes.io/name: cockpit-backend
+    app.kubernetes.io/part-of: cockpit
+    app.kubernetes.io/managed-by: argocd
+  annotations:
+    # AWS IAM Role for Service Account (IRSA) - uncomment for EKS
+    # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/CockpitBackendRole
+
+    # Azure Workload Identity - uncomment for AKS
+    # azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000
+
+    # GCP Workload Identity - uncomment for GKE
+    # iam.gke.io/gcp-service-account: cockpit-backend@project-id.iam.gserviceaccount.com
+
+---
+# ClusterRole - Cockpit Backend needs cluster-wide read access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cockpit-backend-cluster-role
+  labels:
+    app.kubernetes.io/name: cockpit-backend
+    app.kubernetes.io/part-of: cockpit
+rules:
+  # Read namespaces (for project provisioning)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+
+  # Read nodes (for cluster health checks)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+
+  # Manage project namespaces (for provisioning)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Manage ResourceQuotas and LimitRanges in project namespaces
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["create", "update", "patch", "delete", "get", "list"]
+
+  # Manage NetworkPolicies in project namespaces
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "update", "patch", "delete", "get", "list"]
+
+  # Manage RBAC for project members
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "update", "patch", "delete", "get", "list"]
+
+  # Read Argo CD Applications and AppProjects
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "appprojects"]
+    verbs: ["get", "list", "watch"]
+
+  # Create/Update Argo CD Applications (for GitOps orchestration)
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Create AppProjects for new tenants
+  - apiGroups: ["argoproj.io"]
+    resources: ["appprojects"]
+    verbs: ["create", "update", "patch"]
+
+  # Read ExternalSecrets status
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get", "list", "watch"]
+
+  # Create ExternalSecrets for projects
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Manage Kyverno Policies in project namespaces
+  - apiGroups: ["kyverno.io"]
+    resources: ["policies"]
+    verbs: ["create", "update", "patch", "delete", "get", "list"]
+
+---
+# ClusterRoleBinding for Cockpit Backend ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cockpit-backend-cluster-rolebinding
+  labels:
+    app.kubernetes.io/name: cockpit-backend
+    app.kubernetes.io/part-of: cockpit
+subjects:
+  - kind: ServiceAccount
+    name: cockpit-backend-sa
+    namespace: cockpit-system
+roleRef:
+  kind: ClusterRole
+  name: cockpit-backend-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Role - Cockpit Backend needs full access within cockpit-system namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cockpit-backend-role
+  namespace: cockpit-system
+  labels:
+    app.kubernetes.io/name: cockpit-backend
+    app.kubernetes.io/part-of: cockpit
+rules:
+  # Full access to pods (for logs, status, debugging)
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status"]
+    verbs: ["*"]
+
+  # Manage own resources
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["*"]
+
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets", "persistentvolumeclaims"]
+    verbs: ["*"]
+
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["*"]
+
+---
+# RoleBinding for Cockpit Backend ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cockpit-backend-rolebinding
+  namespace: cockpit-system
+  labels:
+    app.kubernetes.io/name: cockpit-backend
+    app.kubernetes.io/part-of: cockpit
+subjects:
+  - kind: ServiceAccount
+    name: cockpit-backend-sa
+    namespace: cockpit-system
+roleRef:
+  kind: Role
+  name: cockpit-backend-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Example: Tenant Project Namespace Template
+# This template shows what gets created for each project
+# Actual creation is done by Cockpit Backend via Kubernetes API
+#
+# apiVersion: v1
+# kind: Namespace
+# metadata:
+#   name: acme-dev
+#   labels:
+#     app.kubernetes.io/managed-by: cockpit
+#     lc2.liferay.com/project-id: acme
+#     lc2.liferay.com/environment: dev
+#     pod-security.kubernetes.io/enforce: restricted
+#   annotations:
+#     lc2.liferay.com/owner: alice@acme-corp.com
+#     lc2.liferay.com/created-by: admin@liferay.com
+#     lc2.liferay.com/created-at: "2025-11-02T10:30:00Z"

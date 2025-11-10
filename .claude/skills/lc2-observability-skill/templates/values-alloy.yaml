@@ -1,0 +1,26 @@
+# alloy values (template)
+namespaceSelector:
+  matchLabels:
+    lc2.liferay.com/logging: "enabled"
+receivers:
+  - type: filelog/k8s-containers
+    include:
+      - /var/log/containers/*.log
+    exclude:
+      - /var/log/containers/*kube-system*.log
+      - /var/log/containers/*argocd*.log
+    operators:
+      - type: k8s_metadata
+      - type: add_attributes
+        attributes:
+          project: "${K8S_NS_LABEL:lc2.liferay.com/project}"
+          env: "${K8S_NS_LABEL:lc2.liferay.com/env}"
+exporters:
+  loki:
+    enabled: true
+    endpoint: http://loki-gateway.logging.svc:3100
+    tenantHeader: X-Scope-OrgID
+    tenantValueFromNsLabel: lc2.liferay.com/project
+  cloud:
+    enabled: false # set true for cloudwatch/logging/log-analytics
+    provider: aws|gcp|azure

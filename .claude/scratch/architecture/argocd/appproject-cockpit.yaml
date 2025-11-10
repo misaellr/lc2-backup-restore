@@ -1,0 +1,161 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: cockpit
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: cockpit-appproject
+    app.kubernetes.io/part-of: cockpit
+    app.kubernetes.io/managed-by: kubectl
+  annotations:
+    lc2.liferay.com/description: "Cockpit Backend control plane AppProject"
+    lc2.liferay.com/owner: "platform-team@liferay.com"
+    lc2.liferay.com/created-at: "2025-11-02T00:00:00Z"
+spec:
+  description: "Cockpit Backend - LC2 Control Plane API"
+
+  # Source repositories allowed for this project
+  sourceRepos:
+    - https://github.com/liferay/lc2-cockpit-backend  # Application source
+    - https://github.com/liferay/lc2-gitops           # GitOps manifests
+    - https://charts.helm.sh/stable                    # Public Helm charts (if needed)
+
+  # Destination clusters and namespaces
+  destinations:
+    # Cockpit system namespace (where backend runs)
+    - namespace: cockpit-system
+      server: https://kubernetes.default.svc
+
+    # Allow cockpit to manage project namespaces (for provisioning)
+    # Pattern: {project-id}-{env}
+    - namespace: '*-dev'
+      server: https://kubernetes.default.svc
+    - namespace: '*-uat'
+      server: https://kubernetes.default.svc
+    - namespace: '*-prd'
+      server: https://kubernetes.default.svc
+
+  # Cluster-scoped resources - Cockpit needs limited cluster access for provisioning
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+
+  # Namespace-scoped resources allowed
+  namespaceResourceWhitelist:
+    # Core resources
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: Secret
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ServiceAccount
+    - group: ''
+      kind: PersistentVolumeClaim
+
+    # Workloads
+    - group: apps
+      kind: Deployment
+    - group: apps
+      kind: StatefulSet
+    - group: apps
+      kind: DaemonSet
+    - group: apps
+      kind: ReplicaSet
+
+    # Networking
+    - group: networking.k8s.io
+      kind: Ingress
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+
+    # RBAC
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+
+    # Policy
+    - group: kyverno.io
+      kind: Policy
+
+    # GitOps
+    - group: argoproj.io
+      kind: Application
+    - group: argoproj.io
+      kind: AppProject
+
+    # External Secrets
+    - group: external-secrets.io
+      kind: ExternalSecret
+    - group: external-secrets.io
+      kind: SecretStore
+
+    # Resource Management
+    - group: ''
+      kind: ResourceQuota
+    - group: ''
+      kind: LimitRange
+
+    # Batch Jobs
+    - group: batch
+      kind: Job
+    - group: batch
+      kind: CronJob
+
+    # Autoscaling
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+
+    # Cert-Manager
+    - group: cert-manager.io
+      kind: Certificate
+    - group: cert-manager.io
+      kind: Issuer
+
+  # Deny list - resources that should NEVER be deployed
+  namespaceResourceBlacklist:
+    # Prevent cockpit from deploying custom CRDs
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+
+  # Roles for accessing this project
+  roles:
+    # Platform admins have full access to cockpit project
+    - name: platform-admin
+      description: "Platform team members with full access"
+      policies:
+        - p, proj:cockpit:platform-admin, applications, *, cockpit/*, allow
+        - p, proj:cockpit:platform-admin, repositories, *, *, allow
+        - p, proj:cockpit:platform-admin, clusters, *, *, allow
+      groups:
+        - platform-team
+
+    # Read-only access for monitoring/auditing
+    - name: viewer
+      description: "Read-only access for monitoring and auditing"
+      policies:
+        - p, proj:cockpit:viewer, applications, get, cockpit/*, allow
+        - p, proj:cockpit:viewer, repositories, get, *, allow
+      groups:
+        - platform-observers
+
+  # Sync windows - when automatic syncs are allowed
+  syncWindows:
+    # Production maintenance window
+    - kind: allow
+      schedule: '0 2 * * 0'  # Sundays at 2 AM UTC
+      duration: 4h
+      applications:
+        - cockpit-backend
+      manualSync: true
+
+  # Orphaned resources - what to do with resources no longer in Git
+  orphanedResources:
+    warn: true  # Warn but don't delete orphaned resources automatically
